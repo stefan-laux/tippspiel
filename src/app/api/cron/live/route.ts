@@ -1,6 +1,7 @@
 import { isAuthorized } from "@/lib/cron-auth";
 import { hasAdminCredentials } from "@/lib/firebase/admin";
 import { liveTick } from "@/lib/sync/orchestrator";
+import { revalidateLivePages } from "@/lib/revalidate";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,6 +16,8 @@ async function handle(req: Request): Promise<Response> {
   }
   try {
     const result = await liveTick();
+    // Refresh the cached pages only on real transitions (kickoff/tips, full-time).
+    if (result.finalized > 0 || result.ranTipScrape) revalidateLivePages();
     return Response.json({ ok: true, ...result });
   } catch (err) {
     return Response.json({ ok: false, error: String(err) }, { status: 500 });

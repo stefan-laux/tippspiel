@@ -2,8 +2,9 @@ import { Leaderboard } from "@/components/Leaderboard";
 import { LiveDot } from "@/components/badges";
 import { getOverallLeaderboard, getLiveLeaderboard, getFixtures } from "@/lib/data";
 
-// Cache the page; refresh at most once a minute to keep Firestore reads low.
-export const revalidate = 60;
+// Cache for a day; the cron invalidates these on-demand when data actually changes
+// (kickoff, full-time, daily sync). Live scores stay realtime via the match page.
+export const revalidate = 86400;
 
 export default async function LeaderboardPage() {
   const [overall, liveLb, fixtures] = await Promise.all([

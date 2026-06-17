@@ -3,8 +3,9 @@ import { getFixtures, getLiveState } from "@/lib/data";
 import { groupBy } from "@/lib/util";
 import type { LiveState } from "@/lib/types";
 
-// Cache the page; refresh at most once a minute to keep Firestore reads low.
-export const revalidate = 60;
+// Cache for a day; the cron invalidates these on-demand when data actually changes
+// (kickoff, full-time, daily sync). Live scores stay realtime via the match page.
+export const revalidate = 86400;
 
 export default async function MatchesPage() {
   const fixtures = await getFixtures();

@@ -1,6 +1,7 @@
 import { isAuthorized } from "@/lib/cron-auth";
 import { hasAdminCredentials } from "@/lib/firebase/admin";
 import { fullSync } from "@/lib/sync/orchestrator";
+import { revalidateAll } from "@/lib/revalidate";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,6 +16,7 @@ async function handle(req: Request): Promise<Response> {
   }
   try {
     const result = await fullSync();
+    revalidateAll();
     return Response.json({ ok: true, ...result });
   } catch (err) {
     return Response.json({ ok: false, error: String(err) }, { status: 500 });

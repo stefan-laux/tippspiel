@@ -7,8 +7,9 @@ import { formatDateTime } from "@/lib/format";
 import { getFixtures, getOverallLeaderboard, getLiveState, getCommunityMeta } from "@/lib/data";
 import type { Fixture, LiveState } from "@/lib/types";
 
-// Cache the page; refresh at most once a minute to keep Firestore reads low.
-export const revalidate = 60;
+// Cache for a day; the cron invalidates these on-demand when data actually changes
+// (kickoff, full-time, daily sync). Live scores stay realtime via the match page.
+export const revalidate = 86400;
 
 function SectionHeader({ title, href, hint }: { title: React.ReactNode; href?: string; hint?: string }) {
   return (
