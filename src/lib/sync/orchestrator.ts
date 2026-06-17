@@ -36,6 +36,7 @@ import {
   getFixturesByIds,
   getTipsForFixture,
   getOverallLeaderboard,
+  getLiveStatesByIds,
   getUsers,
   getScheduleSummary,
 } from "@/lib/data";
@@ -549,10 +550,11 @@ export async function fullSync(): Promise<SyncResult> {
  * Skips fixtures/bonus (they don't change at kickoff); marks the kicked-off fixtures
  * scraped + LIVE so the UI flips even before ESPN maps the match.
  */
-async function scrapeRoundTips(rounds: number[]): Promise<{ tips: number; fixtures: number }> {
+async function scrapeRoundTips(rounds: number[], markIds: string[]): Promise<{ tips: number; fixtures: number }> {
   const now = Date.now();
   const users = await getUsers();
   if (users.length === 0 || rounds.length === 0) return { tips: 0, fixtures: 0 };
+  const markSet = new Set(markIds);
 
   const newTips: Tip[] = [];
 
@@ -569,7 +571,9 @@ async function scrapeRoundTips(rounds: number[]): Promise<{ tips: number; fixtur
       try {
         const page = await fetchUserRound(u.slug, r);
         for (const bet of page.bets) {
-          if (!bet.betId || bet.picks == null) continue;
+          // Only persist tips for the matches that just kicked off (avoid re-writing the
+          // whole round's already-stored tips on every new kickoff).
+          if (!bet.betId || bet.picks == null || !markSet.has(bet.betId)) continue;
           newTips.push(betToTip(bet, member, now));
         }
       } catch (err) {
@@ -579,10 +583,9 @@ async function scrapeRoundTips(rounds: number[]): Promise<{ tips: number; fixtur
     }
   });
 
-  const fixtures = await getFixtures();
-  const roundSet = new Set(rounds);
-  const marked: Fixture[] = fixtures
-    .filter((f) => roundSet.has(f.round) && !f.scrapeDoneForKickoff && f.kickoffMs > 0 && f.kickoffMs <= now)
+  // Mark just those fixtures LIVE + scraped (read only them, not all 104).
+  const marked: Fixture[] = (await getFixturesByIds(markIds))
+    .filter((f) => f.status !== "FINISHED")
     .map((f): Fixture => ({ ...f, status: "LIVE", scrapeDoneForKickoff: true, updatedAtMs: now }));
 
   if (newTips.length) await writeTips(newTips);
@@ -651,11 +654,11 @@ export async function liveTick(): Promise<LiveResult> {
 
   const espn = await fetchEspnScoreboard();
 
-  // Scrape newly-unlocked tips ~5 min after kickoff (targeted to the affected rounds).
-  const roundsNeedingTips = [...new Set(relevant.filter((e) => needsTipScrape(e, now)).map((e) => e.round))];
+  // Scrape newly-unlocked tips ~5 min after kickoff (targeted to the affected matches).
+  const tipEntries = relevant.filter((e) => needsTipScrape(e, now));
   let ranTipScrape = false;
-  if (roundsNeedingTips.length) {
-    await scrapeRoundTips(roundsNeedingTips);
+  if (tipEntries.length) {
+    await scrapeRoundTips([...new Set(tipEntries.map((e) => e.round))], tipEntries.map((e) => e.id));
     ranTipScrape = true;
   }
 
@@ -740,46 +743,64 @@ export async function liveTick(): Promise<LiveResult> {
     return { liveFixtures: liveScores.size, finalized: finalized.length, ranTipScrape, bootstrapped: false, espnCalled: true, idle: false };
   }
 
-  // LIGHT path (common: scores ticking) — update live docs only, from the overall base.
-  const overall = await getOverallLeaderboard(); // 1 read
-  const tipsByFixture = new Map<string, Tip[]>();
-  await Promise.all([...liveScores.keys()].map(async (id) => tipsByFixture.set(id, await getTipsForFixture(id))));
+  // LIGHT path (common). Always refresh the live clock (cheap); only re-read tips and
+  // rewrite boards + live leaderboard when a score actually changed (goals are rare, the
+  // minute ticks every cycle). Tips are fixed after kickoff, so no need to re-read them
+  // every minute.
+  const liveIds = [...liveScores.keys()];
+  const prevByFix = new Map((await getLiveStatesByIds(liveIds)).map((p) => [p.fixtureId, p]));
 
-  const liveStates: LiveState[] = [];
-  const liveBoards: MatchLeaderboard[] = [];
-  const deltaByUser = new Map<string, number>();
-  for (const f of fixtures) {
-    const ls = liveScores.get(f.id);
-    if (!ls) continue;
-    liveStates.push({ fixtureId: f.id, isLive: true, elapsed: ls.elapsed, period: ls.period, homeGoals: ls.home, awayGoals: ls.away, updatedAtMs: now });
-    const entries = (tipsByFixture.get(f.id) ?? [])
-      .map((t) => {
-        const pb = scorePrediction(f.isKnockout, [t.predHome, t.predAway], [ls.home, ls.away]);
-        deltaByUser.set(t.userId, (deltaByUser.get(t.userId) ?? 0) + pb.total);
-        return { userId: t.userId, displayName: t.displayName, predHome: t.predHome, predAway: t.predAway, points: pb.total, breakdown: pb };
-      })
-      .sort((a, b) => b.points - a.points || a.displayName.localeCompare(b.displayName));
-    liveBoards.push({ fixtureId: f.id, status: "LIVE", computedAtMs: now, elapsed: ls.elapsed, period: ls.period, homeGoals: ls.home, awayGoals: ls.away, entries });
-  }
+  const liveStates: LiveState[] = liveIds.map((id) => {
+    const ls = liveScores.get(id)!;
+    return { fixtureId: id, isLive: true, elapsed: ls.elapsed, period: ls.period, homeGoals: ls.home, awayGoals: ls.away, updatedAtMs: now };
+  });
+  await writeLiveStates([...liveStates, ...clearedStates]);
 
-  const liveEntries: LeaderboardEntry[] = (overall?.entries ?? [])
-    .map((e) => {
-      const delta = deltaByUser.get(e.userId) ?? 0;
-      return { userId: e.userId, displayName: e.displayName, rank: 0, points: e.points + delta, delta };
-    })
-    .sort((a, b) => b.points - a.points || a.displayName.localeCompare(b.displayName));
-  let lastPts: number | null = null;
-  let lastRank = 0;
-  liveEntries.forEach((e, i) => {
-    e.rank = e.points === lastPts ? lastRank : i + 1;
-    lastPts = e.points;
-    lastRank = e.rank;
+  const scoreChanged = liveIds.filter((id) => {
+    const ls = liveScores.get(id)!;
+    const p = prevByFix.get(id);
+    return !p || p.homeGoals !== ls.home || p.awayGoals !== ls.away;
   });
 
-  await writeLiveStates([...liveStates, ...clearedStates]);
-  if (liveBoards.length) await writeLiveMatchLeaderboards(liveBoards);
-  await writeLeaderboard({ id: "live", computedAtMs: now, entries: liveEntries });
-  await writeHealth({ lastLiveTickAtMs: now, liveFixtures: liveScores.size, finalized: 0 });
+  if (scoreChanged.length > 0) {
+    const overall = await getOverallLeaderboard();
+    const tipsByFixture = new Map<string, Tip[]>();
+    await Promise.all(liveIds.map(async (id) => tipsByFixture.set(id, await getTipsForFixture(id))));
 
+    const deltaByUser = new Map<string, number>();
+    const liveBoards: MatchLeaderboard[] = [];
+    for (const id of liveIds) {
+      const ls = liveScores.get(id)!;
+      const f = changed.get(id)!;
+      const entries = (tipsByFixture.get(id) ?? [])
+        .map((t) => {
+          const pb = scorePrediction(f.isKnockout, [t.predHome, t.predAway], [ls.home, ls.away]);
+          deltaByUser.set(t.userId, (deltaByUser.get(t.userId) ?? 0) + pb.total);
+          return { userId: t.userId, displayName: t.displayName, predHome: t.predHome, predAway: t.predAway, points: pb.total, breakdown: pb };
+        })
+        .sort((a, b) => b.points - a.points || a.displayName.localeCompare(b.displayName));
+      liveBoards.push({ fixtureId: id, status: "LIVE", computedAtMs: now, elapsed: ls.elapsed, period: ls.period, homeGoals: ls.home, awayGoals: ls.away, entries });
+    }
+
+    const liveEntries: LeaderboardEntry[] = (overall?.entries ?? [])
+      .map((e) => {
+        const delta = deltaByUser.get(e.userId) ?? 0;
+        return { userId: e.userId, displayName: e.displayName, rank: 0, points: e.points + delta, delta };
+      })
+      .sort((a, b) => b.points - a.points || a.displayName.localeCompare(b.displayName));
+    let lastPts: number | null = null;
+    let lastRank = 0;
+    liveEntries.forEach((e, i) => {
+      e.rank = e.points === lastPts ? lastRank : i + 1;
+      lastPts = e.points;
+      lastRank = e.rank;
+    });
+
+    const changedSet = new Set(scoreChanged);
+    await writeLiveMatchLeaderboards(liveBoards.filter((b) => changedSet.has(b.fixtureId)));
+    await writeLeaderboard({ id: "live", computedAtMs: now, entries: liveEntries });
+  }
+
+  await writeHealth({ lastLiveTickAtMs: now, liveFixtures: liveScores.size, finalized: 0 });
   return { liveFixtures: liveScores.size, finalized: 0, ranTipScrape, bootstrapped: false, espnCalled: true, idle: false };
 }

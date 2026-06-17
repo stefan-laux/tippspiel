@@ -82,6 +82,23 @@ export function getFixturesByIds(ids: string[]): Promise<Fixture[]> {
   );
 }
 
+/** Batched read of live-state docs (used by the live tick to detect score changes). */
+export function getLiveStatesByIds(ids: string[]): Promise<LiveState[]> {
+  if (ids.length === 0) return Promise.resolve([]);
+  return read(
+    async () => {
+      const db = adminDb();
+      const snaps = await db.getAll(...ids.map((id) => db.collection(COL.liveState).doc(id)));
+      return snaps.filter((s) => s.exists).map((s) => s.data() as LiveState);
+    },
+    (s) => {
+      const set = new Set(ids);
+      return s.compute.liveStates.filter((l) => set.has(l.fixtureId));
+    },
+    [],
+  );
+}
+
 export function getAllTips(): Promise<Tip[]> {
   return read(
     async () => (await adminDb().collection(COL.tips).get()).docs.map((d) => d.data() as Tip),
