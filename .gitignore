@@ -32,6 +32,15 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+
+# secrets / service accounts (never commit)
+*serviceAccount*.json
+service-account*.json
+*.key
+
+# claude code / agent session data
+.claude/
 
 # vercel
 .vercel

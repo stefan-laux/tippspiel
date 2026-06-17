@@ -1,0 +1,28 @@
+rules_version = '2';
+
+// WM26 Tipps – Firestore security rules.
+// The whole app is PUBLIC READ (no auth): leaderboards, fixtures, tips and bonus data
+// are all non-sensitive, mirrored from the public SRF community page.
+// ALL writes are denied for clients. The only writer is the Firebase Admin SDK used by
+// the server-side cron/scrape routes — the Admin SDK bypasses these rules, so writes
+// still work server-side while clients can never tamper with the data.
+//
+// Paste this into Firebase Console -> Firestore Database -> Rules -> Publish.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /meta/{doc=**}                  { allow read: if true; allow write: if false; }
+    match /users/{doc=**}                 { allow read: if true; allow write: if false; }
+    match /fixtures/{doc=**}              { allow read: if true; allow write: if false; }
+    match /tips/{doc=**}                  { allow read: if true; allow write: if false; }
+    match /liveState/{doc=**}             { allow read: if true; allow write: if false; }
+    match /matchLeaderboards/{doc=**}     { allow read: if true; allow write: if false; }
+    match /liveMatchLeaderboards/{doc=**} { allow read: if true; allow write: if false; }
+    match /leaderboards/{doc=**}          { allow read: if true; allow write: if false; }
+    match /bonusQuestions/{doc=**}        { allow read: if true; allow write: if false; }
+    match /bonusAnswers/{doc=**}          { allow read: if true; allow write: if false; }
+
+    // Deny everything else by default.
+    match /{document=**} { allow read, write: if false; }
+  }
+}
