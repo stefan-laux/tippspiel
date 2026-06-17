@@ -1,4 +1,5 @@
 import { Leaderboard } from "@/components/Leaderboard";
+import { LiveStandings } from "@/components/live/LiveStandings";
 import { LiveDot } from "@/components/badges";
 import { getOverallLeaderboard, getLiveLeaderboard, getFixtures } from "@/lib/data";
 
@@ -27,7 +28,7 @@ export default async function LeaderboardPage() {
           <p className="mb-3 text-xs text-muted">
             Inklusive provisorischer Punkte aus laufenden Spielen.
           </p>
-          <Leaderboard entries={liveLb.entries} live />
+          <LiveStandings initial={liveLb.entries} />
         </section>
       )}
 

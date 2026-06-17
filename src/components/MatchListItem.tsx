@@ -2,6 +2,7 @@ import Link from "next/link";
 import clsx from "clsx";
 import { Flag } from "@/components/Flag";
 import { StatusBadge } from "@/components/badges";
+import { LiveScore } from "@/components/live/LiveScore";
 import { formatTime, score } from "@/lib/format";
 import type { Fixture } from "@/lib/types";
 
@@ -36,8 +37,13 @@ export function MatchListItem({
         </div>
 
         <div className="flex min-w-[3.5rem] flex-col items-center">
-          {isDone || isLive ? (
-            <span className={clsx("rounded-md px-2 py-0.5 text-base font-extrabold tabular-nums", isLive ? "bg-live/15 text-live" : "bg-surface-2")}>
+          {isLive ? (
+            <LiveScore
+              fixtureId={f.id}
+              initial={{ home: homeGoals, away: awayGoals, elapsed: null, period: null }}
+            />
+          ) : isDone ? (
+            <span className="rounded-md bg-surface-2 px-2 py-0.5 text-base font-extrabold tabular-nums">
               {score(homeGoals, awayGoals)}
             </span>
           ) : (
