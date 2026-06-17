@@ -3,7 +3,8 @@ import { getFixtures, getLiveState } from "@/lib/data";
 import { groupBy } from "@/lib/util";
 import type { LiveState } from "@/lib/types";
 
-export const dynamic = "force-dynamic";
+// Cache the page; refresh at most once a minute to keep Firestore reads low.
+export const revalidate = 60;
 
 export default async function MatchesPage() {
   const fixtures = await getFixtures();

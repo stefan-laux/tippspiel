@@ -16,7 +16,7 @@ const USER_AGENT =
 
 async function fetchHtml(url: string, attempt = 0): Promise<string> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20_000);
+  const timeout = setTimeout(() => controller.abort(), 12_000);
   try {
     const res = await fetch(url, {
       headers: { "User-Agent": USER_AGENT, Accept: "text/html" },

@@ -3,7 +3,8 @@ import { getBonusQuestions, getBonusAnswers } from "@/lib/data";
 import { groupBy } from "@/lib/util";
 import clsx from "clsx";
 
-export const dynamic = "force-dynamic";
+// Cache the page; refresh at most once a minute to keep Firestore reads low.
+export const revalidate = 60;
 
 export default async function BonusPage() {
   const [questions, answers] = await Promise.all([getBonusQuestions(), getBonusAnswers()]);

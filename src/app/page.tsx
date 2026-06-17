@@ -7,7 +7,8 @@ import { formatDateTime } from "@/lib/format";
 import { getFixtures, getOverallLeaderboard, getLiveState, getCommunityMeta } from "@/lib/data";
 import type { Fixture, LiveState } from "@/lib/types";
 
-export const dynamic = "force-dynamic";
+// Cache the page; refresh at most once a minute to keep Firestore reads low.
+export const revalidate = 60;
 
 function SectionHeader({ title, href, hint }: { title: React.ReactNode; href?: string; hint?: string }) {
   return (

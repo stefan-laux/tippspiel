@@ -11,6 +11,7 @@ import type {
   BonusQuestion,
   BonusAnswer,
   CommunityMeta,
+  ScheduleSummary,
 } from "@/lib/types";
 
 // Admin-side Firestore writes. Everything here runs server-only (cron/scrape routes).
@@ -34,6 +35,10 @@ async function commitUpserts(ops: DocOp[]): Promise<void> {
 
 export async function writeCommunityMeta(meta: CommunityMeta): Promise<void> {
   await adminDb().collection(COL.meta).doc(DOC.community).set(meta, { merge: true });
+}
+
+export async function writeSchedule(summary: ScheduleSummary): Promise<void> {
+  await adminDb().collection(COL.meta).doc(DOC.schedule).set(summary, { merge: false });
 }
 
 export async function writeFixtures(fixtures: Fixture[]): Promise<void> {

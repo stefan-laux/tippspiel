@@ -15,7 +15,8 @@ import {
 } from "@/lib/data";
 import type { Fixture } from "@/lib/types";
 
-export const dynamic = "force-dynamic";
+// Cache the page; refresh at most once a minute to keep Firestore reads low.
+export const revalidate = 60;
 
 function BackLink() {
   return (

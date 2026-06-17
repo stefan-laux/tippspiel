@@ -14,6 +14,7 @@ export const COL = {
 
 export const DOC = {
   community: "community", // meta/community
+  schedule: "schedule", // meta/schedule (1-doc fixture summary for the live tick)
   overall: "overall", // leaderboards/overall
   live: "live", // leaderboards/live
   health: "health", // meta/health (cron heartbeat)

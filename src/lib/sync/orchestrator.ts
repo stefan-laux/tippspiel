@@ -33,7 +33,11 @@ import {
   getAllTips,
   getBonusAnswers,
   getFixtures,
+  getFixturesByIds,
+  getTipsForFixture,
+  getOverallLeaderboard,
   getUsers,
+  getScheduleSummary,
 } from "@/lib/data";
 import {
   writeFixtures,
@@ -46,6 +50,7 @@ import {
   writeLiveStates,
   writeLeaderboard,
   writeCommunityMeta,
+  writeSchedule,
   writeHealth,
   deleteDocs,
 } from "@/lib/sync/store";
@@ -59,6 +64,10 @@ import type {
   BonusQuestion,
   BonusAnswer,
   PointsBreakdown,
+  ScheduleSummary,
+  ScheduleEntry,
+  LeaderboardEntry,
+  MatchStatus,
 } from "@/lib/types";
 
 const POLITE_DELAY_MS = 250;
@@ -488,6 +497,7 @@ export async function fullSync(): Promise<SyncResult> {
 
   // persist
   await writeFixtures(fixtures);
+  await writeSchedule(buildScheduleSummary(fixtures, now));
   await writeTips(out.tips);
   await writeBonusQuestions(bonusQuestions);
   await writeBonusAnswers(bonusAnswers);
@@ -531,6 +541,55 @@ export async function fullSync(): Promise<SyncResult> {
   };
 }
 
+// --- targeted tip scrape (fast, used at kickoff) ------------------------------
+
+/**
+ * Lightweight scrape of just the given rounds' tips for all known members — used at
+ * kickoff so the live tick stays fast (a full scrape would time out the function).
+ * Skips fixtures/bonus (they don't change at kickoff); marks the kicked-off fixtures
+ * scraped + LIVE so the UI flips even before ESPN maps the match.
+ */
+async function scrapeRoundTips(rounds: number[]): Promise<{ tips: number; fixtures: number }> {
+  const now = Date.now();
+  const users = await getUsers();
+  if (users.length === 0 || rounds.length === 0) return { tips: 0, fixtures: 0 };
+
+  const newTips: Tip[] = [];
+
+  await mapLimit(users, SCRAPE_CONCURRENCY, async (u) => {
+    const member: ScrapedMember = {
+      slug: u.slug,
+      displayName: u.displayName,
+      isAdmin: u.isAdmin,
+      rank: u.rank,
+      groupPoints: 0,
+      globalPoints: 0,
+    };
+    for (const r of rounds) {
+      try {
+        const page = await fetchUserRound(u.slug, r);
+        for (const bet of page.bets) {
+          if (!bet.betId || bet.picks == null) continue;
+          newTips.push(betToTip(bet, member, now));
+        }
+      } catch (err) {
+        console.error(`[live] tip scrape failed for ${u.slug} round ${r}:`, err);
+      }
+      await sleep(POLITE_DELAY_MS);
+    }
+  });
+
+  const fixtures = await getFixtures();
+  const roundSet = new Set(rounds);
+  const marked: Fixture[] = fixtures
+    .filter((f) => roundSet.has(f.round) && !f.scrapeDoneForKickoff && f.kickoffMs > 0 && f.kickoffMs <= now)
+    .map((f): Fixture => ({ ...f, status: "LIVE", scrapeDoneForKickoff: true, updatedAtMs: now }));
+
+  if (newTips.length) await writeTips(newTips);
+  if (marked.length) await writeFixtures(marked);
+  return { tips: newTips.length, fixtures: marked.length };
+}
+
 // --- live tick ----------------------------------------------------------------
 
 export interface LiveResult {
@@ -543,53 +602,66 @@ export interface LiveResult {
 }
 
 /** A fixture worth calling ESPN for right now: live, or within its kickoff window. */
-function fixtureRelevant(f: Fixture, now: number): boolean {
+function fixtureRelevant(f: { status: MatchStatus; kickoffMs: number }, now: number): boolean {
   if (f.status === "LIVE") return true;
   if (f.status === "FINISHED") return false;
   if (f.kickoffMs <= 0) return false;
   return now >= f.kickoffMs - LIVE_WINDOW_BEFORE_MS && now <= f.kickoffMs + LIVE_WINDOW_AFTER_MS;
 }
 
+function needsTipScrape(e: { status: MatchStatus; kickoffMs: number; scrapeDoneForKickoff: boolean }, now: number): boolean {
+  return e.status !== "FINISHED" && !e.scrapeDoneForKickoff && e.kickoffMs > 0 && now >= e.kickoffMs + TIP_SCRAPE_DELAY_MS;
+}
+
+function buildScheduleSummary(fixtures: Fixture[], now: number): ScheduleSummary {
+  return {
+    updatedAtMs: now,
+    entries: fixtures.map((f) => ({
+      id: f.id,
+      round: f.round,
+      kickoffMs: f.kickoffMs,
+      status: f.status,
+      scrapeDoneForKickoff: Boolean(f.scrapeDoneForKickoff),
+    })),
+  };
+}
+
 /**
- * Frequent live update. Does nothing (no ESPN call) when no match is near. During a match
- * window it polls ESPN once, updates live state/score/minute + leaderboards, scrapes a
- * match's tips ~5 min after kickoff, and finalizes points from ESPN at full-time. If the
- * DB is empty it bootstraps a full sync first.
+ * Frequent live update — designed to be CHEAP on Firestore. An idle tick costs a single
+ * doc read (the schedule summary) and no writes. During a match window it polls ESPN once,
+ * reads only the relevant fixtures + the live fixtures' tips + the precomputed overall
+ * board, and updates the live docs. The expensive full recompute runs only on the rare
+ * tick where a match actually finishes. Never auto-bootstraps (that's the daily sync's job).
  */
 export async function liveTick(): Promise<LiveResult> {
   const now = Date.now();
-  let fixtures = await getFixtures();
+  const idle: LiveResult = {
+    liveFixtures: 0,
+    finalized: 0,
+    ranTipScrape: false,
+    bootstrapped: false,
+    espnCalled: false,
+    idle: true,
+  };
 
-  // Empty DB -> bootstrap the full plan + tips + bonus from SRF.
-  if (fixtures.length === 0) {
-    await fullSync();
-    return { liveFixtures: 0, finalized: 0, ranTipScrape: true, bootstrapped: true, espnCalled: false, idle: false };
-  }
-
-  // No match near -> just a heartbeat, skip ESPN entirely.
-  if (!fixtures.some((f) => fixtureRelevant(f, now))) {
-    await writeHealth({ lastLiveTickAtMs: now, liveFixtures: 0, idle: true });
-    return { liveFixtures: 0, finalized: 0, ranTipScrape: false, bootstrapped: false, espnCalled: false, idle: true };
-  }
+  const schedule = await getScheduleSummary(); // 1 read
+  if (!schedule || schedule.entries.length === 0) return idle;
+  const relevant: ScheduleEntry[] = schedule.entries.filter((e) => fixtureRelevant(e, now));
+  if (relevant.length === 0) return idle;
 
   const espn = await fetchEspnScoreboard();
-  let espnByFixture = matchEspnToFixtures(fixtures, espn);
 
-  // A match kicked off >= 5 min ago whose tips we haven't scraped yet -> scrape now.
-  const needTips = fixtures.some(
-    (f) =>
-      f.status !== "FINISHED" &&
-      !f.scrapeDoneForKickoff &&
-      f.kickoffMs > 0 &&
-      now >= f.kickoffMs + TIP_SCRAPE_DELAY_MS,
-  );
+  // Scrape newly-unlocked tips ~5 min after kickoff (targeted to the affected rounds).
+  const roundsNeedingTips = [...new Set(relevant.filter((e) => needsTipScrape(e, now)).map((e) => e.round))];
   let ranTipScrape = false;
-  if (needTips) {
-    await fullSync();
+  if (roundsNeedingTips.length) {
+    await scrapeRoundTips(roundsNeedingTips);
     ranTipScrape = true;
-    fixtures = await getFixtures();
-    espnByFixture = matchEspnToFixtures(fixtures, espn);
   }
+
+  // Read only the relevant fixtures (a handful), not all 104.
+  const fixtures = await getFixturesByIds(relevant.map((e) => e.id));
+  const espnByFixture = matchEspnToFixtures(fixtures, espn);
 
   const liveScores = new Map<string, LiveScore>();
   const liveFixtures: Fixture[] = [];
@@ -609,7 +681,6 @@ export async function liveTick(): Promise<LiveResult> {
         liveFixtures.push(f);
       }
     } else if (m.state === "post" && f.status !== "FINISHED") {
-      // Finalize directly from ESPN's final score — no SRF scrape needed to end a match.
       const g = orientGoals(f, m);
       if (g.home != null && g.away != null) {
         f.status = "FINISHED";
@@ -632,40 +703,83 @@ export async function liveTick(): Promise<LiveResult> {
     }
   }
 
+  // Keep the 1-doc schedule summary in sync with status changes (no extra reads).
+  const changed = new Map(fixtures.map((f) => [f.id, f]));
+  if (liveFixtures.length || finalized.length || ranTipScrape) {
+    const entries = schedule.entries.map((e) => {
+      const f = changed.get(e.id);
+      return f
+        ? { id: f.id, round: f.round, kickoffMs: f.kickoffMs, status: f.status, scrapeDoneForKickoff: Boolean(f.scrapeDoneForKickoff) }
+        : e;
+    });
+    await writeSchedule({ updatedAtMs: now, entries });
+  }
+  if (liveFixtures.length || finalized.length) await writeFixtures([...liveFixtures, ...finalized]);
+
   if (liveScores.size === 0 && finalized.length === 0) {
     await writeHealth({ lastLiveTickAtMs: now, liveFixtures: 0, idle: false });
-    return { liveFixtures: 0, finalized: 0, ranTipScrape, bootstrapped: false, espnCalled: true, idle: false };
+    return { ...idle, ranTipScrape, espnCalled: true, idle: false };
   }
 
-  const [tips, bonusAnswers, users] = await Promise.all([getAllTips(), getBonusAnswers(), getUsers()]);
-  const userBase = users.map((u) => ({ id: u.id, displayName: u.displayName, isAdmin: u.isAdmin }));
-  const out = computeEverything(fixtures, tips, bonusAnswers, userBase, liveScores, now);
-
-  // Live-affected writes.
-  if (liveFixtures.length || finalized.length) await writeFixtures([...liveFixtures, ...finalized]);
-  const liveTips = out.tips.filter((t) => liveScores.has(t.fixtureId));
-  if (liveTips.length) await writeTips(liveTips);
-  await writeLiveStates([...out.liveStates, ...clearedStates]);
-  if (out.liveMatchBoards.length) await writeLiveMatchLeaderboards(out.liveMatchBoards);
-  await writeLeaderboard(out.live);
-
-  // When a match just finished, also persist its final board + the updated overall standings.
+  // FINALIZE path (rare) — a match just ended, so recompute the standings correctly.
   if (finalized.length) {
+    const merged = (await getFixtures()).map((f) => changed.get(f.id) ?? f);
+    const [tips, bonusAnswers, users] = await Promise.all([getAllTips(), getBonusAnswers(), getUsers()]);
+    const userBase = users.map((u) => ({ id: u.id, displayName: u.displayName, isAdmin: u.isAdmin }));
+    const out = computeEverything(merged, tips, bonusAnswers, userBase, liveScores, now);
     const fset = new Set(finalized.map((f) => f.id));
-    await writeTips(out.tips.filter((t) => fset.has(t.fixtureId)));
+    const tipsToWrite = out.tips.filter((t) => liveScores.has(t.fixtureId) || fset.has(t.fixtureId));
+    if (tipsToWrite.length) await writeTips(tipsToWrite);
+    await writeLiveStates([...out.liveStates, ...clearedStates]);
+    if (out.liveMatchBoards.length) await writeLiveMatchLeaderboards(out.liveMatchBoards);
     await writeMatchLeaderboards(out.matchBoards.filter((b) => fset.has(b.fixtureId)));
     await writeUsers(out.users);
     await writeLeaderboard(out.overall);
+    await writeLeaderboard(out.live);
+    await writeHealth({ lastLiveTickAtMs: now, liveFixtures: liveScores.size, finalized: finalized.length });
+    return { liveFixtures: liveScores.size, finalized: finalized.length, ranTipScrape, bootstrapped: false, espnCalled: true, idle: false };
   }
 
-  await writeHealth({ lastLiveTickAtMs: now, liveFixtures: liveScores.size, finalized: finalized.length });
+  // LIGHT path (common: scores ticking) — update live docs only, from the overall base.
+  const overall = await getOverallLeaderboard(); // 1 read
+  const tipsByFixture = new Map<string, Tip[]>();
+  await Promise.all([...liveScores.keys()].map(async (id) => tipsByFixture.set(id, await getTipsForFixture(id))));
 
-  return {
-    liveFixtures: liveScores.size,
-    finalized: finalized.length,
-    ranTipScrape,
-    bootstrapped: false,
-    espnCalled: true,
-    idle: false,
-  };
+  const liveStates: LiveState[] = [];
+  const liveBoards: MatchLeaderboard[] = [];
+  const deltaByUser = new Map<string, number>();
+  for (const f of fixtures) {
+    const ls = liveScores.get(f.id);
+    if (!ls) continue;
+    liveStates.push({ fixtureId: f.id, isLive: true, elapsed: ls.elapsed, period: ls.period, homeGoals: ls.home, awayGoals: ls.away, updatedAtMs: now });
+    const entries = (tipsByFixture.get(f.id) ?? [])
+      .map((t) => {
+        const pb = scorePrediction(f.isKnockout, [t.predHome, t.predAway], [ls.home, ls.away]);
+        deltaByUser.set(t.userId, (deltaByUser.get(t.userId) ?? 0) + pb.total);
+        return { userId: t.userId, displayName: t.displayName, predHome: t.predHome, predAway: t.predAway, points: pb.total, breakdown: pb };
+      })
+      .sort((a, b) => b.points - a.points || a.displayName.localeCompare(b.displayName));
+    liveBoards.push({ fixtureId: f.id, status: "LIVE", computedAtMs: now, elapsed: ls.elapsed, period: ls.period, homeGoals: ls.home, awayGoals: ls.away, entries });
+  }
+
+  const liveEntries: LeaderboardEntry[] = (overall?.entries ?? [])
+    .map((e) => {
+      const delta = deltaByUser.get(e.userId) ?? 0;
+      return { userId: e.userId, displayName: e.displayName, rank: 0, points: e.points + delta, delta };
+    })
+    .sort((a, b) => b.points - a.points || a.displayName.localeCompare(b.displayName));
+  let lastPts: number | null = null;
+  let lastRank = 0;
+  liveEntries.forEach((e, i) => {
+    e.rank = e.points === lastPts ? lastRank : i + 1;
+    lastPts = e.points;
+    lastRank = e.rank;
+  });
+
+  await writeLiveStates([...liveStates, ...clearedStates]);
+  if (liveBoards.length) await writeLiveMatchLeaderboards(liveBoards);
+  await writeLeaderboard({ id: "live", computedAtMs: now, entries: liveEntries });
+  await writeHealth({ lastLiveTickAtMs: now, liveFixtures: liveScores.size, finalized: 0 });
+
+  return { liveFixtures: liveScores.size, finalized: 0, ranTipScrape, bootstrapped: false, espnCalled: true, idle: false };
 }

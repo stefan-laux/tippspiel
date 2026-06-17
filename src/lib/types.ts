@@ -167,6 +167,21 @@ export interface BonusAnswer {
   pointsAwarded: number;
 }
 
+/** Tiny per-fixture summary stored in ONE doc, so the live tick can decide relevance
+ *  with a single read instead of reading every fixture each minute. */
+export interface ScheduleEntry {
+  id: string;
+  round: number;
+  kickoffMs: number;
+  status: MatchStatus;
+  scrapeDoneForKickoff: boolean;
+}
+
+export interface ScheduleSummary {
+  updatedAtMs: number;
+  entries: ScheduleEntry[];
+}
+
 export interface CommunityMeta {
   id: string;
   name: string;

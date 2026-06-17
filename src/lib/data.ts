@@ -12,6 +12,7 @@ import type {
   BonusQuestion,
   BonusAnswer,
   CommunityMeta,
+  ScheduleSummary,
 } from "@/lib/types";
 
 // Server-side reads. In production these read Firestore via the Admin SDK. When no admin
@@ -30,7 +31,8 @@ async function read<T>(adminFn: () => Promise<T>, devFn: (s: Awaited<ReturnType<
   if (hasAdminCredentials()) {
     try {
       return await adminFn();
-    } catch {
+    } catch (err) {
+      console.error("[data] Firestore read failed:", err);
       return empty;
     }
   }
@@ -60,6 +62,23 @@ export function getFixture(id: string): Promise<Fixture | null> {
     },
     (s) => s.fixtures.find((f) => f.id === id) ?? null,
     null,
+  );
+}
+
+/** Batched read of just the given fixtures (1 round-trip, N doc reads) — used by the live tick. */
+export function getFixturesByIds(ids: string[]): Promise<Fixture[]> {
+  if (ids.length === 0) return Promise.resolve([]);
+  return read(
+    async () => {
+      const db = adminDb();
+      const snaps = await db.getAll(...ids.map((id) => db.collection(COL.fixtures).doc(id)));
+      return snaps.filter((s) => s.exists).map((s) => s.data() as Fixture);
+    },
+    (s) => {
+      const set = new Set(ids);
+      return s.fixtures.filter((f) => set.has(f.id));
+    },
+    [],
   );
 }
 
@@ -160,6 +179,27 @@ export function getBonusAnswers(): Promise<BonusAnswer[]> {
       (await adminDb().collection(COL.bonusAnswers).get()).docs.map((d) => d.data() as BonusAnswer),
     (s) => s.bonusAnswers,
     [],
+  );
+}
+
+/** Single-doc fixture summary — the cheap read the live tick uses to decide relevance. */
+export function getScheduleSummary(): Promise<ScheduleSummary | null> {
+  return read(
+    async () => {
+      const d = await adminDb().collection(COL.meta).doc(DOC.schedule).get();
+      return d.exists ? (d.data() as ScheduleSummary) : null;
+    },
+    (s) => ({
+      updatedAtMs: s.now,
+      entries: s.fixtures.map((f) => ({
+        id: f.id,
+        round: f.round,
+        kickoffMs: f.kickoffMs,
+        status: f.status,
+        scrapeDoneForKickoff: Boolean(f.scrapeDoneForKickoff),
+      })),
+    }),
+    null,
   );
 }
 

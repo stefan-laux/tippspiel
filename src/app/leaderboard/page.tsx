@@ -2,7 +2,8 @@ import { Leaderboard } from "@/components/Leaderboard";
 import { LiveDot } from "@/components/badges";
 import { getOverallLeaderboard, getLiveLeaderboard, getFixtures } from "@/lib/data";
 
-export const dynamic = "force-dynamic";
+// Cache the page; refresh at most once a minute to keep Firestore reads low.
+export const revalidate = 60;
 
 export default async function LeaderboardPage() {
   const [overall, liveLb, fixtures] = await Promise.all([
