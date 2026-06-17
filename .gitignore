@@ -2,6 +2,10 @@
 
 # dependencies
 /node_modules
+
+# A committed package-lock.json triggers npm's "Exit handler never called!" crash on
+# Vercel's build image (the reify-from-lockfile path). Installing fresh avoids it.
+package-lock.json
 /.pnp
 .pnp.*
 .yarn/*
