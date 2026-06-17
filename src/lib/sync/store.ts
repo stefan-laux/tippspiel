@@ -106,3 +106,15 @@ export async function writeLeaderboard(lb: Leaderboard): Promise<void> {
 export async function writeHealth(data: Record<string, unknown>): Promise<void> {
   await adminDb().collection(COL.meta).doc(DOC.health).set(data, { merge: true });
 }
+
+export async function deleteDocs(collection: string, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const db = adminDb();
+  for (let i = 0; i < ids.length; i += FIRESTORE_BATCH_LIMIT) {
+    const batch = db.batch();
+    for (const id of ids.slice(i, i + FIRESTORE_BATCH_LIMIT)) {
+      batch.delete(db.collection(collection).doc(id));
+    }
+    await batch.commit();
+  }
+}

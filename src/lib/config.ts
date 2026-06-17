@@ -67,6 +67,14 @@ export function isChampionQuestion(text: string): boolean {
   return /weltmeister/i.test(text);
 }
 
+// --- Scheduling windows (used by the live tick) ---
+/** Scrape a match's tips this long AFTER kickoff (tips unlock at kickoff; small buffer). */
+export const TIP_SCRAPE_DELAY_MS = 5 * 60_000;
+/** A fixture becomes "live-relevant" this long before kickoff (so ESPN polling starts early). */
+export const LIVE_WINDOW_BEFORE_MS = 10 * 60_000;
+/** ...and stays relevant until this long after kickoff (covers ET + penalties + finalize). */
+export const LIVE_WINDOW_AFTER_MS = Math.round(3.5 * 3600_000);
+
 export function getCronSecret(): string {
   return process.env.CRON_SECRET || "";
 }

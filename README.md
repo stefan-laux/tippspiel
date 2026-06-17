@@ -102,12 +102,14 @@ whole JSON into `FIREBASE_SERVICE_ACCOUNT` (one line). Keep it out of git — `.
 4. After the first deploy, hit `/api/cron/sync?secret=YOUR_CRON_SECRET` once to seed data.
 5. Schedule the jobs with a free scheduler such as [cron-job.org](https://cron-job.org):
 
-   | Job | URL | Schedule |
-   |---|---|---|
-   | Live tick | `https://YOURAPP/api/cron/live?secret=…` | every **1 min** |
-   | Full sync (safety net) | `https://YOURAPP/api/cron/sync?secret=…` | every **15 min** |
+   | Job | URL | Schedule | What it does |
+   |---|---|---|---|
+   | Live tick | `https://YOURAPP/api/cron/live?secret=…` | every **1 min** | During a match window: pulls live score/minute, scrapes that match's tips ~5 min after kickoff, finalizes points from ESPN at full-time. Skips ESPN entirely when no match is on. Bootstraps an empty DB. |
+   | Daily verify | `https://YOURAPP/api/cron/sync?secret=…` | **once a day** | Re-scrapes SRF to reconcile tips/results and prune members who left. |
 
-`vercel.json` also defines a daily Vercel cron as a fallback. The live tick is self-throttling — it only does real work while a match is in progress, and ESPN has no per-day cap.
+`vercel.json` already defines the daily sync as a Vercel cron, so on Vercel you only need to add the 1-minute live tick externally.
+
+**Request load:** ESPN is called ~once/minute **only while matches are live** (free, no key, no per-day cap); when idle it makes zero calls. SRF is scraped just a handful of times per day — once to bootstrap, once per match (~5 min after kickoff, when tips unlock), and once daily to verify — because tips are locked by SRF at kickoff and never change afterward.
 
 > Any always-on Node host (Railway, Fly, a VPS) works too — just run `next start` and point a cron at the same routes.
 

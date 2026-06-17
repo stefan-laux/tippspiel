@@ -6,8 +6,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-// Full scrape + recompute. Run periodically (~10-15 min), on deploy/startup, and it is
-// also triggered automatically by the live tick at each kickoff / final whistle.
+// Full scrape + recompute + cleanup. Run once a day to verify/reconcile (and to bootstrap).
+// During matches the live tick scrapes newly-unlocked tips and finalizes results itself.
 async function handle(req: Request): Promise<Response> {
   if (!isAuthorized(req)) return new Response("Unauthorized", { status: 401 });
   if (!hasAdminCredentials()) {
